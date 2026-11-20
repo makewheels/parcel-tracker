@@ -44,7 +44,7 @@ def call(path, payload):
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
     )
     try:
-        with urlopen(request, timeout=20) as response:
+        with urlopen(request, timeout=35 if path == "/subscribe" else 20) as response:
             return json.load(response)
     except HTTPError as error:
         return json.load(error)
