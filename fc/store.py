@@ -2,7 +2,7 @@
 import os
 
 from tablestore import (
-    ComparatorType, Condition, OTSClient, OTSServiceError, Row,
+    ComparatorType, Condition, Direction, INF_MAX, INF_MIN, OTSClient, OTSServiceError, Row,
     RowExistenceExpectation, SingleColumnCondition,
 )
 
@@ -21,6 +21,19 @@ class Store:
     def get(self, number):
         _, row, _ = self.client.get_row(self.table, [("number", number)], max_version=1)
         return {key: value for key, value, _ in row.attribute_columns} if row else None
+
+    def scan(self):
+        start = [("number", INF_MIN)]
+        end = [("number", INF_MAX)]
+        columns = ["number", "name", "company", "subscription", "monitor_status",
+                   "notification_paused", "attempted_at"]
+        while start:
+            _, start, rows, _ = self.client.get_range(
+                self.table, Direction.FORWARD, start, end, columns_to_get=columns, limit=100
+            )
+            for row in rows:
+                number = dict(row.primary_key)["number"]
+                yield number, {key: value for key, value, _ in row.attribute_columns}
 
     def create(self, number, values):
         row = Row([("number", number)], list(values.items()))

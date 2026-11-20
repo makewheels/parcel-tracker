@@ -22,13 +22,17 @@ CARRIERS = {
     "shunfeng": "顺丰速运", "shunfengkuaiyun": "顺丰快运", "yunda": "韵达速递",
     "jtexpress": "极兔速递", "jd": "京东物流", "ems": "EMS",
 }
+STATES = {
+    "active": "跟踪中", "completed": "已签收", "paused": "已暂停提醒",
+    "aborted": "跟踪中止", "pending": "待确认", "failed": "订阅失败",
+}
 
 
-def respond(code, message):
+def respond(code, message, **data):
     return {
         "statusCode": code,
         "headers": {"Content-Type": "application/json; charset=utf-8"},
-        "body": json.dumps({"result": code == 200, "returnCode": str(code), "message": message},
+        "body": json.dumps({"result": code == 200, "returnCode": str(code), "message": message, **data},
                            ensure_ascii=False),
     }
 
@@ -61,9 +65,8 @@ def subscribe(store, event, data, number):
     if row and row["subscription"] == "active":
         if data.get("name") is not None:
             store.update(number, {"name": name})
-        label = {"shutdown": "运单已签收", "abort": "运单跟踪已中止"}.get(
-            row.get("monitor_status"), "已在跟踪"
-        )
+        state = parcel_state(row)
+        label = "已在跟踪" if state == "active" else STATES[state]
         saved_name = name if data.get("name") is not None else row.get("name", "")
         return respond(200, label + (f" · {saved_name}" if saved_name else ""))
     now = int(time.time())
@@ -113,6 +116,60 @@ def subscribe(store, event, data, number):
                "601": "请检查试用是否过期", "700": "快递公司编码不受支持",
                "701": "请检查运单资料或回调地址", "702": "请提供快递公司或检查套餐额度"}
     return respond(422, f"快递100未确认订阅（{code}）{reasons.get(code, '')}")
+
+
+def parcel_state(row):
+    terminal = {"shutdown": "completed", "abort": "aborted"}.get(row.get("monitor_status"))
+    if terminal:
+        return terminal
+    if row.get("notification_paused") and row.get("subscription") in {"active", "submitting"}:
+        return "paused"
+    return {"active": "active", "submitting": "pending"}.get(row.get("subscription"), "failed")
+
+
+def parcel_details(number, row):
+    status = parcel_state(row)
+    company = row.get("company") or ""
+    return {"number": number, "name": row.get("name") or "", "company": company,
+            "carrier": CARRIERS.get(company, company), "status": status, "status_label": STATES[status]}
+
+
+def scan_parcels(store, status=None):
+    if status not in (None, "") and status not in STATES:
+        return respond(400, "运单状态筛选值无效")
+    counts = dict.fromkeys(STATES, 0)
+    matches = []
+    for number, row in store.scan():
+        state = parcel_state(row)
+        counts[state] += 1
+        # 空字符串表示列出所有运单，None 表示仅统计。
+        if status == "" or state == status:
+            matches.append((row.get("attempted_at", 0), parcel_details(number, row)))
+    total = sum(counts.values())
+    if status is None:
+        message = f"共 {total} 件｜" + " · ".join(f"{label} {counts[state]}" for state, label in STATES.items())
+        return respond(200, message, total=total, counts=counts)
+    matches.sort(key=lambda match: match[0], reverse=True)
+    return respond(200, f"{STATES.get(status, '全部运单')} · {len(matches)} 件",
+                   parcels=[details for _, details in matches])
+
+
+def set_paused(store, number, paused):
+    row = store.get(number)
+    if not row:
+        return respond(404, "运单未录入")
+    status = parcel_state(row)
+    if status in {"completed", "aborted", "failed"}:
+        return respond(409, f"{STATES[status]}，当前没有可更改的提醒")
+    if bool(row.get("notification_paused")) == paused:
+        return respond(200, "提醒已暂停" if paused else "提醒已开启")
+    if row["delivery_until"] > time.time() or not store.update(
+        number, {"notification_paused": paused}, ("delivery_lock", row["delivery_lock"])
+    ):
+        return respond(409, "运单正在处理回调，请稍后再试")
+    if paused:
+        return respond(200, "已停止飞书提醒，快递100仍会跟踪，轨迹可继续查询")
+    return respond(200, "已恢复飞书提醒，从下一次物流更新起发送")
 
 
 def read_callback(body, content_type):
@@ -232,14 +289,15 @@ def callback(store, data, number):
     carrier = result.get("com") or row.get("company") or ""
     encoded = json.dumps(tracks, ensure_ascii=False)
     event_id = hashlib.sha256(f"{number}\n{status}\n{encoded}".encode()).hexdigest()
-    if row.get("sent") == event_id:
+    if (row.get("handled_event") or row.get("sent")) == event_id:
         return respond(200, "成功")
     now = int(time.time())
     if row["delivery_until"] > now:
         return respond(503, "回调正在处理")
     lock = uuid.uuid4().hex
     if not store.update(number, {"delivery_lock": lock, "delivery_until": now + 45,
-                                 "tracks": encoded, "subscription": "active"},
+                                 "tracks": encoded, "subscription": "active",
+                                 "monitor_status": status, "company": carrier},
                         ("delivery_lock", row["delivery_lock"])):
         return respond(503, "回调正在处理")
 
@@ -247,12 +305,16 @@ def callback(store, data, number):
     reason = (data.get("message") or "") if status == "abort" else ""
     sent_at = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
     try:
+        # 停止提醒和回调共用同一运单锁。取得锁后读取最新的提醒设置。
+        if store.get(number).get("notification_paused"):
+            store.update(number, {"handled_event": event_id, "delivery_until": 0}, ("delivery_lock", lock))
+            return respond(200, "成功")
         card, message = format_notice(note, carrier, number, status, reason, tracks, sent_at)
         notify(card, message, event_id)
     except Exception:
         store.update(number, {"delivery_until": 0}, ("delivery_lock", lock))
         raise
-    store.update(number, {"monitor_status": status, "sent": event_id, "delivery_until": 0},
+    store.update(number, {"sent": event_id, "handled_event": event_id, "delivery_until": 0},
                  ("delivery_lock", lock))
     return respond(200, "成功")
 
@@ -261,7 +323,8 @@ def handler(event, context):
     try:
         event = json.loads(event)
         path = event.get("rawPath") or event.get("requestContext", {}).get("http", {}).get("path")
-        if path not in {"/subscribe", "/note", "/callback"}:
+        if path not in {"/subscribe", "/note", "/summary", "/list", "/show",
+                        "/unsubscribe", "/resume", "/callback"}:
             return respond(404, "未知路径")
         headers = {key.lower(): value for key, value in event.get("headers", {}).items()}
         body = event.get("body") or ""
@@ -279,12 +342,24 @@ def handler(event, context):
                                    "Bearer " + os.environ["PARCEL_API_TOKEN"]):
             return respond(403, "录单认证失败")
         data = json.loads(body)
+        store = Store()
+        if path == "/summary":
+            return scan_parcels(store)
+        if path == "/list":
+            return scan_parcels(store, data.get("status", ""))
         number = data["number"].strip().upper()
         if not re.fullmatch(r"[A-Z0-9-]{6,32}", number):
             return respond(400, "运单号格式错误")
-        store = Store()
         if path == "/subscribe":
             return subscribe(store, event, data, number)
+        if path == "/show":
+            row = store.get(number)
+            if not row:
+                return respond(404, "运单未录入")
+            tracks = [{"time": when, "detail": detail} for when, detail in json.loads(row.get("tracks") or "[]")]
+            return respond(200, "查询成功", parcel=parcel_details(number, row), tracks=tracks)
+        if path in {"/unsubscribe", "/resume"}:
+            return set_paused(store, number, path == "/unsubscribe")
         name = data["name"].strip()
         if len(name) > 120:
             return respond(400, "备注最多 120 字")
