@@ -7,6 +7,8 @@ import os
 import re
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
+from html import escape
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlencode
 from urllib.request import Request, urlopen
@@ -125,10 +127,63 @@ def read_callback(body, content_type):
     return json.loads(body)
 
 
-def notify(message, event_id):
+def markdown_text(value):
+    return re.sub(r"([\\`*_~\[\]()#|])", r"\\\1", escape(" ".join(value.split()), quote=False))
+
+
+def format_notice(note, carrier, number, status, reason, tracks, sent_at):
+    label, color = {
+        "shutdown": ("已签收", "green"),
+        "abort": ("跟踪中止", "orange"),
+    }.get(status, ("最新动态", "blue"))
+    title = f"📦 {note}"
+    subtitle = " · ".join(filter(None, (CARRIERS.get(carrier, carrier), number)))
+    footer = f"推送时间  {sent_at}（北京时间）"
+
+    elements = []
+    latest = [f"**{label}**"]
+    if reason:
+        latest.append(markdown_text(reason))
+    if tracks:
+        when, detail = tracks[0]
+        latest.extend((f"**{markdown_text(when) or '时间未知'}**", markdown_text(detail)))
+    else:
+        latest.append("暂无物流轨迹")
+    elements.append({"tag": "markdown", "content": "<br>".join(latest)})
+    if len(tracks) > 1:
+        history = [f"**此前轨迹 · {len(tracks) - 1} 条**"]
+        history.extend(
+            f"**{markdown_text(when) or '时间未知'}**<br>{markdown_text(detail)}"
+            for when, detail in tracks[1:]
+        )
+        elements.extend(({"tag": "hr"}, {"tag": "markdown", "content": "\n\n".join(history)}))
+    elements.extend(({"tag": "hr"}, {"tag": "markdown", "content": f"*{footer}*"}))
+    card = {
+        "schema": "2.0",
+        "header": {
+            "template": color,
+            "title": {"tag": "plain_text", "content": title},
+            "subtitle": {"tag": "plain_text", "content": subtitle},
+        },
+        "body": {"elements": elements},
+    }
+    text_blocks = [f"{title} · {label}\n{subtitle}"]
+    if reason:
+        text_blocks.append(reason)
+    text_blocks.extend(f"{when or '时间未知'}\n{detail}" for when, detail in tracks)
+    if not tracks:
+        text_blocks.append("暂无物流轨迹")
+    text_blocks.append(footer)
+    return card, "\n\n".join(text_blocks)
+
+
+def notify(card, message, event_id):
     webhook = os.getenv("FEISHU_WEBHOOK")
     if webhook:
-        data = {"msg_type": "text", "content": {"text": message}}
+        data = {"msg_type": "interactive", "card": card}
+        # 给自定义机器人的签名字段预留空间。
+        if len(json.dumps(data, ensure_ascii=False).encode()) > 19_500:
+            data = {"msg_type": "text", "content": {"text": message}}
         secret = os.getenv("FEISHU_SECRET")
         if secret:
             timestamp = str(int(time.time()))
@@ -142,10 +197,15 @@ def notify(message, event_id):
     token = post_json("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", {
         "app_id": os.environ["FEISHU_APP_ID"], "app_secret": os.environ["FEISHU_APP_SECRET"],
     })
-    response = post_json("https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id", {
-        "receive_id": os.environ["FEISHU_CHAT_ID"], "msg_type": "text",
-        "content": json.dumps({"text": message}, ensure_ascii=False), "uuid": event_id[:48],
-    }, {"Authorization": f"Bearer {token['tenant_access_token']}"})
+    data = {
+        "receive_id": os.environ["FEISHU_CHAT_ID"], "msg_type": "interactive",
+        "content": json.dumps(card, ensure_ascii=False, separators=(",", ":")),
+        "uuid": event_id[:48],
+    }
+    if len(json.dumps(data, ensure_ascii=False).encode()) > 29_000:
+        data.update(msg_type="text", content=json.dumps({"text": message}, ensure_ascii=False))
+    response = post_json("https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id", data,
+                         {"Authorization": f"Bearer {token['tenant_access_token']}"})
     if response.get("code") != 0:
         raise RuntimeError("Feishu app rejected message")
 
@@ -184,17 +244,11 @@ def callback(store, data, number):
         return respond(503, "回调正在处理")
 
     note = row.get("name") or "快递提醒"
-    label = {"shutdown": "已签收", "abort": "跟踪中止"}.get(status, "物流更新")
-    lines = [f"📦 {note} · {label}", f"{CARRIERS.get(carrier, carrier)} {number}".strip()]
-    if status == "abort" and data.get("message"):
-        lines.append(data["message"])
-    if tracks:
-        lines.append(f"完整轨迹（{len(tracks)} 条，最新在上）")
-        lines.extend(f"{when}  {detail}".strip() for when, detail in tracks)
-    else:
-        lines.append("暂无物流轨迹")
+    reason = (data.get("message") or "") if status == "abort" else ""
+    sent_at = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
     try:
-        notify("\n".join(lines), event_id)
+        card, message = format_notice(note, carrier, number, status, reason, tracks, sent_at)
+        notify(card, message, event_id)
     except Exception:
         store.update(number, {"delivery_until": 0}, ("delivery_lock", lock))
         raise
