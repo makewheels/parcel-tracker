@@ -138,7 +138,7 @@ def format_notice(note, carrier, number, status, reason, tracks, sent_at):
     }.get(status, ("最新动态", "blue"))
     title = f"📦 {note}"
     subtitle = " · ".join(filter(None, (CARRIERS.get(carrier, carrier), number)))
-    footer = f"推送时间  {sent_at}（北京时间）"
+    footer = f"推送时间  {sent_at}"
 
     elements = []
     latest = [f"**{label}**"]
