@@ -65,10 +65,13 @@ def subscribe(store, event, data, number):
     if row and row["subscription"] == "active":
         if data.get("name") is not None:
             store.update(number, {"name": name})
+            row["name"] = name
         state = parcel_state(row)
         label = "已在跟踪" if state == "active" else STATES[state]
-        saved_name = name if data.get("name") is not None else row.get("name", "")
-        return respond(200, label + (f" · {saved_name}" if saved_name else ""))
+        message = label + (f" · {row['name']}" if row.get("name") else "")
+        if row.get("confirmation_retry_at", -1) >= 0:
+            return send_subscription_confirmation(store, number, row, message)
+        return respond(200, message)
     now = int(time.time())
     if row and row["subscription"] == "submitting" and now - row["attempted_at"] < 30:
         return respond(409, "正在确认订阅结果，请稍后再试")
@@ -105,8 +108,10 @@ def subscribe(store, event, data, number):
     accepted = result.get("result") is True and str(result.get("returnCode")) == "200"
     condition = ("attempt", version)
     if accepted:
-        store.update(number, {"subscription": "active"}, condition)
-        return respond(200, f"已开始跟踪 {number}" + (f" · {values['name']}" if values["name"] else ""))
+        if not store.update(number, {"subscription": "active", "confirmation_retry_at": 0}, condition):
+            return respond(409, "运单状态已变化，请重查订阅")
+        message = f"已开始跟踪 {number}" + (f" · {values['name']}" if values["name"] else "")
+        return send_subscription_confirmation(store, number, store.get(number), message)
     current = store.get(number)
     if current and current["subscription"] == "active":
         return respond(200, f"已开始跟踪 {number}")
@@ -116,6 +121,34 @@ def subscribe(store, event, data, number):
                "601": "请检查试用是否过期", "700": "快递公司编码不受支持",
                "701": "请检查运单资料或回调地址", "702": "请提供快递公司或检查套餐额度"}
     return respond(422, f"快递100未确认订阅（{code}）{reasons.get(code, '')}")
+
+
+def send_subscription_confirmation(store, number, row, message):
+    if row.get("notification_paused"):
+        return respond(200, message + " · 飞书提醒已暂停", confirmation="paused")
+    # 0 表示待发送，正值表示最早可重试时间，-1 表示已发送。
+    retry_at = row["confirmation_retry_at"]
+    if retry_at == -1:
+        return respond(200, message, confirmation="sent")
+    now = int(time.time())
+    deadline = now + 35
+    if retry_at > now or not store.update(
+        number, {"confirmation_retry_at": deadline}, ("confirmation_retry_at", retry_at)
+    ):
+        return respond(200, message + " · 飞书确认处理中", confirmation="pending")
+
+    card, text = format_notice(row.get("name") or "快递提醒", row.get("company") or "", number,
+                               "subscribed", "快递100已确认订阅，有新轨迹时会发到这里。", [])
+    event_id = hashlib.sha256(f"subscription\n{number}\n{row['attempt']}".encode()).hexdigest()
+    condition = ("confirmation_retry_at", deadline)
+    try:
+        notify(card, text, event_id)
+    except Exception as error:
+        store.update(number, {"confirmation_retry_at": 0}, condition)
+        print("订阅确认发送失败", type(error).__name__)
+        return respond(200, message + " · 飞书确认发送失败，可重试同一单号补发", confirmation="pending")
+    store.update(number, {"confirmation_retry_at": -1}, condition)
+    return respond(200, message + " · 飞书已发送订阅确认", confirmation="sent")
 
 
 def parcel_state(row):
@@ -188,13 +221,16 @@ def markdown_text(value):
     return re.sub(r"([\\`*_~\[\]()#|])", r"\\\1", escape(" ".join(value.split()), quote=False))
 
 
-def format_notice(note, carrier, number, status, reason, tracks, sent_at):
+def format_notice(note, carrier, number, status, reason, tracks, sent_at=None):
     label, color = {
+        "subscribed": ("订阅成功", "green"),
         "shutdown": ("已签收", "green"),
         "abort": ("跟踪中止", "orange"),
     }.get(status, ("最新动态", "blue"))
     title = f"📦 {note}"
     subtitle = " · ".join(filter(None, (CARRIERS.get(carrier, carrier), number)))
+    if sent_at is None:
+        sent_at = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
     footer = f"推送时间  {sent_at}"
 
     elements = []
@@ -204,7 +240,7 @@ def format_notice(note, carrier, number, status, reason, tracks, sent_at):
     if tracks:
         when, detail = tracks[0]
         latest.extend((f"**{markdown_text(when) or '时间未知'}**", markdown_text(detail)))
-    else:
+    elif status != "subscribed":
         latest.append("暂无物流轨迹")
     elements.append({"tag": "markdown", "content": "<br>".join(latest)})
     if len(tracks) > 1:
@@ -228,7 +264,7 @@ def format_notice(note, carrier, number, status, reason, tracks, sent_at):
     if reason:
         text_blocks.append(reason)
     text_blocks.extend(f"{when or '时间未知'}\n{detail}" for when, detail in tracks)
-    if not tracks:
+    if not tracks and status != "subscribed":
         text_blocks.append("暂无物流轨迹")
     text_blocks.append(footer)
     return card, "\n\n".join(text_blocks)
@@ -303,13 +339,12 @@ def callback(store, data, number):
 
     note = row.get("name") or "快递提醒"
     reason = (data.get("message") or "") if status == "abort" else ""
-    sent_at = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
     try:
         # 停止提醒和回调共用同一运单锁。取得锁后读取最新的提醒设置。
         if store.get(number).get("notification_paused"):
             store.update(number, {"handled_event": event_id, "delivery_until": 0}, ("delivery_lock", lock))
             return respond(200, "成功")
-        card, message = format_notice(note, carrier, number, status, reason, tracks, sent_at)
+        card, message = format_notice(note, carrier, number, status, reason, tracks)
         notify(card, message, event_id)
     except Exception:
         store.update(number, {"delivery_until": 0}, ("delivery_lock", lock))

@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -30,6 +31,38 @@ def print_result(result):
             print(format_parcel(parcel))
 
 
+def call(path, payload):
+    """调云端服务，返回解析后的 dict（HTTP 4xx 也按 JSON 处理）。"""
+    config = json.loads(CONFIG.read_text()) if CONFIG.exists() else {}
+    url = os.getenv("PARCEL_SERVICE_URL", config.get("service_url", "")).rstrip("/")
+    token = os.getenv("PARCEL_API_TOKEN", config.get("api_token", ""))
+    if not url.startswith("https://") or not token:
+        raise ValueError(f"请在 {CONFIG} 配置 service_url 和 api_token")
+    request = Request(
+        url + path,
+        data=json.dumps(payload, ensure_ascii=False).encode(),
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+    )
+    try:
+        with urlopen(request, timeout=20) as response:
+            return json.load(response)
+    except HTTPError as error:
+        return json.load(error)
+
+
+def hours_since(text):
+    """把 '2026-11-20 14:40:43' 转成 '18 小时前'；解析失败返回空串。"""
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            delta = datetime.now() - datetime.strptime(text, fmt)
+        except (ValueError, TypeError):
+            continue
+        if delta.days >= 1:
+            return f"{delta.days} 天前"
+        return f"{max(delta.seconds // 3600, 0)} 小时前"
+    return ""
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -50,36 +83,57 @@ def main():
     unsubscribe.add_argument("number")
     resume = commands.add_parser("resume", help="恢复飞书提醒")
     resume.add_argument("number")
-    for command in (add, note, summary, listing, show, unsubscribe, resume):
+    board = commands.add_parser("board", help="一览：所有在途件 + 最新一条进度")
+    board.add_argument("--status", choices=STATUSES, default="active", help="默认只看在途")
+    find = commands.add_parser("find", help="按单号或备注模糊查找")
+    find.add_argument("keyword")
+    for command in (add, note, summary, listing, show, unsubscribe, resume, board, find):
         command.add_argument("--json", action="store_true", help="输出 JSON，便于程序读取")
     args = parser.parse_args()
 
     try:
-        config = json.loads(CONFIG.read_text()) if CONFIG.exists() else {}
-        url = os.getenv("PARCEL_SERVICE_URL", config.get("service_url", "")).rstrip("/")
-        token = os.getenv("PARCEL_API_TOKEN", config.get("api_token", ""))
-        if not url.startswith("https://") or not token:
-            raise ValueError(f"请在 {CONFIG} 配置 service_url 和 api_token")
         payload = vars(args).copy()
         command = payload.pop("command")
         as_json = payload.pop("json")
-        path = "/subscribe" if command == "add" else f"/{command}"
-        request = Request(
-            url + path,
-            data=json.dumps(payload, ensure_ascii=False).encode(),
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        )
-        try:
-            with urlopen(request, timeout=20) as response:
-                result = json.load(response)
-        except HTTPError as error:
-            result = json.load(error)
+        if command == "board":
+            status = payload.get("status", "active")
+            listing_res = call("/list", {"status": status})
+            rows = []
+            for parcel in listing_res.get("parcels", ()):
+                detail = call("/show", {"number": parcel["number"]})
+                tracks = detail.get("tracks") or []
+                newest = tracks[0] if tracks else {}
+                rows.append({**parcel,
+                             "last_time": newest.get("time", ""),
+                             "last_detail": newest.get("detail", ""),
+                             "last_ago": hours_since(newest.get("time", ""))})
+            result = {"result": True, "message": f"在途 {len(rows)} 件", "parcels": rows}
+        elif command == "find":
+            keyword = payload["keyword"].lower()
+            listing_res = call("/list", {})
+            hits = [p for p in listing_res.get("parcels", ())
+                    if keyword in (p["number"] + " " + (p.get("name") or "")).lower()]
+            result = {"result": True, "message": f"匹配 {len(hits)} 件", "parcels": hits}
+        else:
+            path = "/subscribe" if command == "add" else f"/{command}"
+            result = call(path, payload)
+
         if as_json:
             print(json.dumps(result, ensure_ascii=False))
             return 0 if result.get("result") else 1
         if not result.get("result"):
             raise ValueError(result.get("message") or "云端操作失败")
-        print_result(result)
+
+        if command == "board":
+            print(f"{result['message']}\n")
+            for p in result["parcels"]:
+                print(f"【{p.get('name') or '未备注'}】{p['number']}  {p['carrier']}  {p['status_label']}")
+                if p["last_time"]:
+                    print(f"  {p['last_time']}（{p['last_ago']}） {p['last_detail']}")
+                else:
+                    print("  暂无轨迹")
+        else:
+            print_result(result)
         return 0
     except (ValueError, OSError, URLError) as error:
         print(f"操作失败：{error}", file=sys.stderr)
