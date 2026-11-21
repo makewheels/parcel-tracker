@@ -27,10 +27,17 @@ fn = json.loads(subprocess.check_output(["aliyun", "fc", "get-function", "--func
 for key, value in (fn.get("environmentVariables") or {}).items():
     print(f"export {key}={shlex.quote(value)}")
 print("export PARCEL_ROLE=" + shlex.quote(fn["role"]))
-cfg = json.loads((pathlib.Path.home() / ".aliyun/config.json").read_text())
-profile = next((p for p in cfg.get("profiles", []) if p.get("name") == cfg.get("current")), cfg["profiles"][0])
-print("export ALIBABA_CLOUD_ACCESS_KEY_ID=" + shlex.quote(profile["access_key_id"]))
-print("export ALIBABA_CLOUD_ACCESS_KEY_SECRET=" + shlex.quote(profile["access_key_secret"]))
+# 优先用快递包裹专属 RAM 用户的凭据；没有才退回本机 CLI 配置
+creds = pathlib.Path.home() / ".config/parcel-tracker/deploy-credentials.json"
+if creds.exists():
+    data = json.loads(creds.read_text())
+    print("export ALIBABA_CLOUD_ACCESS_KEY_ID=" + shlex.quote(data["access_key_id"]))
+    print("export ALIBABA_CLOUD_ACCESS_KEY_SECRET=" + shlex.quote(data["access_key_secret"]))
+else:
+    cfg = json.loads((pathlib.Path.home() / ".aliyun/config.json").read_text())
+    profile = next((p for p in cfg.get("profiles", []) if p.get("name") == cfg.get("current")), cfg["profiles"][0])
+    print("export ALIBABA_CLOUD_ACCESS_KEY_ID=" + shlex.quote(profile["access_key_id"]))
+    print("export ALIBABA_CLOUD_ACCESS_KEY_SECRET=" + shlex.quote(profile["access_key_secret"]))
 EOF
 chmod 600 "$env_file"
 # shellcheck disable=SC1090
