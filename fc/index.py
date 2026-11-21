@@ -1,4 +1,3 @@
-# 自动部署自检标记（可随时删除）
 """快递100订阅与 HTTP 回调。"""
 import base64
 import hashlib
