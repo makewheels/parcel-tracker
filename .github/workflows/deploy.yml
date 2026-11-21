@@ -33,6 +33,8 @@ jobs:
           ALIBABA_CLOUD_ACCESS_KEY_ID: ${{ secrets.ALIBABA_CLOUD_ACCESS_KEY_ID }}
           ALIBABA_CLOUD_ACCESS_KEY_SECRET: ${{ secrets.ALIBABA_CLOUD_ACCESS_KEY_SECRET }}
           PARCEL_ROLE: ${{ secrets.PARCEL_ROLE }}
+          OSS_BUCKET: parcel-tracker-code
+          OSS_ENDPOINT: https://oss-cn-beijing.aliyuncs.com
           KUAIDI100_APPCODE: ${{ secrets.KUAIDI100_APPCODE }}
           PARCEL_API_TOKEN: ${{ secrets.PARCEL_API_TOKEN }}
           PARCEL_CALLBACK_SECRET: ${{ secrets.PARCEL_CALLBACK_SECRET }}

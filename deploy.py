@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["alibabacloud-fc20230330"]
+# dependencies = ["alibabacloud-fc20230330", "oss2"]
 # ///
 """将代码部署到函数计算 3.0，并输出 HTTP 触发器地址。"""
 import argparse
@@ -51,10 +51,27 @@ def package():
                     archive.write(file, file.relative_to(dependencies))
             for file in SOURCE.glob("*.py"):
                 archive.write(file, file.name)
-        return fc.InputCodeLocation(zip_file=base64.b64encode(buffer.getvalue()).decode())
+        return buffer.getvalue()
     finally:
         if build.resolve().parent == root and build.name.startswith("parcel-deploy-") and not build.is_symlink():
             shutil.rmtree(build)
+
+
+def code_location(zip_bytes, bucket=None, endpoint=None, object_prefix="parcel-tracker"):
+    """小包直接内联；跨网慢（GitHub 跑者写超时）时改为先传 OSS，再让 FC 从 OSS 拉。"""
+    if not bucket:
+        return fc.InputCodeLocation(zip_file=base64.b64encode(zip_bytes).decode())
+    import hashlib
+
+    import oss2
+
+    endpoint = endpoint or os.getenv("OSS_ENDPOINT") or "https://oss-cn-beijing.aliyuncs.com"
+    auth = oss2.Auth(os.environ["ALIBABA_CLOUD_ACCESS_KEY_ID"], os.environ["ALIBABA_CLOUD_ACCESS_KEY_SECRET"])
+    client = oss2.Bucket(auth, endpoint, bucket)
+    object_name = f"{object_prefix}/{hashlib.sha256(zip_bytes).hexdigest()[:16]}.zip"
+    client.put_object(object_name, zip_bytes)
+    print(f"代码包已上传 OSS：oss://{bucket}/{object_name}", flush=True)
+    return fc.InputCodeLocation(oss_bucket_name=bucket, oss_object_name=object_name)
 
 
 def call_with_retry(func, attempts=4, delay=3):
@@ -77,6 +94,10 @@ def main():
     parser.add_argument("--region", default="cn-beijing")
     parser.add_argument("--name", default="parcel-tracker")
     parser.add_argument("--role", required=True, help="函数的 RAM 角色 ARN")
+    parser.add_argument("--oss-bucket", default=os.getenv("OSS_BUCKET", ""),
+                        help="代码包先传到此 OSS 桶（跨网部署时避免写超时）")
+    parser.add_argument("--oss-endpoint", default=os.getenv("OSS_ENDPOINT", ""),
+                        help="OSS endpoint，默认 https://oss-cn-beijing.aliyuncs.com")
     args = parser.parse_args()
     missing = [name for name in REQUIRED if not os.environ.get(name)]
     if missing:
@@ -94,7 +115,7 @@ def main():
         region_id=args.region,
     )
     client = Client(config)
-    code = package()
+    code = code_location(package(), args.oss_bucket, args.oss_endpoint)
     runtime = RuntimeOptions(connect_timeout=30000, read_timeout=180000)
     try:
         client.get_function(args.name, fc.GetFunctionRequest())
