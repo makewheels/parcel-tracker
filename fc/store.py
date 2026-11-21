@@ -26,7 +26,7 @@ class Store:
         start = [("number", INF_MIN)]
         end = [("number", INF_MAX)]
         columns = ["number", "name", "company", "subscription", "monitor_status",
-                   "notification_paused", "attempted_at"]
+                   "notification_paused", "attempted_at", "kind"]
         while start:
             _, start, rows, _ = self.client.get_range(
                 self.table, Direction.FORWARD, start, end, columns_to_get=columns, limit=100

@@ -26,6 +26,9 @@ STATES = {
     "active": "跟踪中", "completed": "已签收", "paused": "已暂停提醒",
     "aborted": "跟踪中止", "pending": "待确认", "failed": "订阅失败",
 }
+# 运单用途：买的排在前面，退货随后，其次是我寄出的、其他。
+KINDS = {"buy": "买的", "return": "退货", "send": "寄出", "other": "其他"}
+KIND_ORDER = ("buy", "return", "send", "other")
 
 
 def respond(code, message, **data):
@@ -54,6 +57,9 @@ def subscribe(store, event, data, number):
     company = ALIASES.get(company, company)
     name = (data.get("name") or "").strip()
     phone = (data.get("phone") or "").strip()
+    kind = (data.get("kind") or "").strip().lower()
+    if kind and kind not in KINDS:
+        return respond(400, "运单类型只能是 buy、return、send、other")
     if not re.fullmatch(r"[a-z0-9]{0,40}", company) or len(name) > 120 or len(phone) > 40:
         return respond(400, "请检查快递公司编码、备注或电话号码")
     if not phone and company in {"shunfeng", "shunfengkuaiyun"}:
@@ -63,9 +69,14 @@ def subscribe(store, event, data, number):
 
     row = store.get(number)
     if row and row["subscription"] == "active":
+        updates = {}
         if data.get("name") is not None:
-            store.update(number, {"name": name})
-            row["name"] = name
+            updates["name"] = name
+        if kind:
+            updates["kind"] = kind
+        if updates:
+            store.update(number, updates)
+            row.update(updates)
         state = parcel_state(row)
         label = "已在跟踪" if state == "active" else STATES[state]
         message = label + (f" · {row['name']}" if row.get("name") else "")
@@ -77,7 +88,8 @@ def subscribe(store, event, data, number):
         return respond(409, "正在确认订阅结果，请稍后再试")
     version = uuid.uuid4().hex
     values = {"subscription": "submitting", "attempted_at": now, "attempt": version,
-              "company": company, "name": name if data.get("name") is not None else (row or {}).get("name", "")}
+              "company": company, "kind": kind or (row or {}).get("kind") or "buy",
+              "name": name if data.get("name") is not None else (row or {}).get("name", "")}
     if row:
         claimed = store.update(number, values, ("attempt", row["attempt"]))
     else:
@@ -163,27 +175,38 @@ def parcel_state(row):
 def parcel_details(number, row):
     status = parcel_state(row)
     company = row.get("company") or ""
+    kind = row.get("kind") or "other"
     return {"number": number, "name": row.get("name") or "", "company": company,
-            "carrier": CARRIERS.get(company, company), "status": status, "status_label": STATES[status]}
+            "carrier": CARRIERS.get(company, company), "status": status, "status_label": STATES[status],
+            "kind": kind, "kind_label": KINDS.get(kind, kind)}
 
 
-def scan_parcels(store, status=None):
-    if status not in (None, "") and status not in STATES:
+def scan_parcels(store, status=None, kind=None):
+    if status not in (None, "", *STATES):
         return respond(400, "运单状态筛选值无效")
+    valid_kinds = (None, "", *KINDS)
+    if kind not in valid_kinds:
+        return respond(400, "运单类型筛选值无效")
     counts = dict.fromkeys(STATES, 0)
     matches = []
     for number, row in store.scan():
         state = parcel_state(row)
         counts[state] += 1
+        row_kind = row.get("kind") or "other"
+        if kind:
+            if row_kind != kind:
+                continue
         # 空字符串表示列出所有运单，None 表示仅统计。
         if status == "" or state == status:
             matches.append((row.get("attempted_at", 0), parcel_details(number, row)))
     total = sum(counts.values())
-    if status is None:
+    if status is None and not kind:
         message = f"共 {total} 件｜" + " · ".join(f"{label} {counts[state]}" for state, label in STATES.items())
         return respond(200, message, total=total, counts=counts)
-    matches.sort(key=lambda match: match[0], reverse=True)
-    return respond(200, f"{STATES.get(status, '全部运单')} · {len(matches)} 件",
+    matches.sort(key=lambda match: (KIND_ORDER.index(match[1]["kind"]) if match[1]["kind"] in KIND_ORDER
+                                    else len(KIND_ORDER), -int(match[0] or 0)))
+    label = KINDS.get(kind) or STATES.get(status, "全部运单")
+    return respond(200, f"{label} · {len(matches)} 件",
                    parcels=[details for _, details in matches])
 
 
@@ -406,7 +429,7 @@ def handler(event, context):
         if path == "/summary":
             return scan_parcels(store)
         if path == "/list":
-            return scan_parcels(store, data.get("status", ""))
+            return scan_parcels(store, data.get("status", ""), data.get("kind", ""))
         number = data["number"].strip().upper()
         if not re.fullmatch(r"[A-Z0-9-]{6,32}", number):
             return respond(400, "运单号格式错误")
@@ -420,12 +443,23 @@ def handler(event, context):
             return respond(200, "查询成功", parcel=parcel_details(number, row), tracks=tracks)
         if path in {"/unsubscribe", "/resume"}:
             return set_paused(store, number, path == "/unsubscribe")
-        name = data["name"].strip()
+        name = (data.get("name") or "").strip()
+        kind = (data.get("kind") or "").strip().lower()
         if len(name) > 120:
             return respond(400, "备注最多 120 字")
-        if not store.update(number, {"name": name}):
+        if kind and kind not in KINDS:
+            return respond(400, "运单类型只能是 buy、return、send、other")
+        updates = {}
+        if name:
+            updates["name"] = name
+        if kind:
+            updates["kind"] = kind
+        if not updates:
+            return respond(400, "请提供新备注或新的运单类型")
+        if not store.update(number, updates):
             return respond(404, "运单未录入")
-        return respond(200, f"已更新备注 · {number}")
+        changed = "备注" if name and not kind else ("类型" if kind and not name else "备注和类型")
+        return respond(200, f"已更新{changed} · {number}")
     except (ValueError, TypeError, AttributeError, KeyError):
         return respond(400, "请求数据格式错误")
     except Exception as error:
