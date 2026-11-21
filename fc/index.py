@@ -68,7 +68,9 @@ def subscribe(store, event, data, number):
         return respond(503, "飞书接收方尚未配置")
 
     row = store.get(number)
-    if row and row["subscription"] == "active":
+    state = parcel_state(row) if row else None
+    # 跟踪中止（abort）的运单允许重新订阅：快递100 要求 abort 后隔 30 分钟再提交。
+    if row and row["subscription"] == "active" and state != "aborted":
         updates = {}
         if data.get("name") is not None:
             updates["name"] = name
@@ -77,7 +79,6 @@ def subscribe(store, event, data, number):
         if updates:
             store.update(number, updates)
             row.update(updates)
-        state = parcel_state(row)
         label = "已在跟踪" if state == "active" else STATES[state]
         message = label + (f" · {row['name']}" if row.get("name") else "")
         if row.get("confirmation_retry_at", -1) >= 0:
@@ -88,7 +89,9 @@ def subscribe(store, event, data, number):
         return respond(409, "正在确认订阅结果，请稍后再试")
     version = uuid.uuid4().hex
     values = {"subscription": "submitting", "attempted_at": now, "attempt": version,
-              "company": company, "kind": kind or (row or {}).get("kind") or "buy",
+              "company": company or (row or {}).get("company") or "",
+              "kind": kind or (row or {}).get("kind") or "buy", "monitor_status": "",
+              "confirmation_retry_at": 0,
               "name": name if data.get("name") is not None else (row or {}).get("name", "")}
     if row:
         claimed = store.update(number, values, ("attempt", row["attempt"]))
@@ -176,9 +179,12 @@ def parcel_details(number, row):
     status = parcel_state(row)
     company = row.get("company") or ""
     kind = row.get("kind") or "other"
-    return {"number": number, "name": row.get("name") or "", "company": company,
-            "carrier": CARRIERS.get(company, company), "status": status, "status_label": STATES[status],
-            "kind": kind, "kind_label": KINDS.get(kind, kind)}
+    details = {"number": number, "name": row.get("name") or "", "company": company,
+               "carrier": CARRIERS.get(company, company), "status": status, "status_label": STATES[status],
+               "kind": kind, "kind_label": KINDS.get(kind, kind)}
+    if row.get("abort_reason"):
+        details["abort_reason"] = row["abort_reason"]
+    return details
 
 
 def scan_parcels(store, status=None, kind=None):
@@ -379,9 +385,10 @@ def callback(store, data, number):
     if row["delivery_until"] > now:
         return respond(503, "回调正在处理")
     lock = uuid.uuid4().hex
+    extra = {"abort_reason": reason[:300]} if status == "abort" and reason else {}
     if not store.update(number, {"delivery_lock": lock, "delivery_until": now + 45,
                                  "tracks": encoded, "subscription": "active",
-                                 "monitor_status": status, "company": carrier},
+                                 "monitor_status": status, "company": carrier, **extra},
                         ("delivery_lock", row["delivery_lock"])):
         return respond(503, "回调正在处理")
 
