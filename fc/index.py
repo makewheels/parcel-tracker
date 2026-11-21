@@ -244,49 +244,47 @@ def format_notice(note, carrier, number, status, reason, tracks, sent_at=None):
         "shutdown": ("已签收", "green"),
         "abort": ("跟踪中止", "orange"),
     }.get(status, ("最新动态", "blue"))
-    # 卡片标题只放状态（订阅成功 / 最新动态 / 已签收），备注名做副标题，单号进正文。
+    # 标题只放状态；正文只有两行——名字（突出显示）+ 单号；底部只留发送时间。
     title = label
-    subtitle = note or ""
     if sent_at is None:
         sent_at = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
-    footer = f"推送时间  {sent_at}"
+    footer = f"发送时间  {sent_at}"
 
     elements = []
-    head = [f"单号 {number}" + (f" · {CARRIERS.get(carrier, carrier)}" if carrier else "")]
-    elements.append({"tag": "markdown", "content": "<br>".join(head)})
-    latest = []
-    if reason:
-        latest.append(markdown_text(reason))
-    if tracks:
-        when, detail = tracks[0]
-        latest.extend((f"**{markdown_text(when) or '时间未知'}**", markdown_text(detail)))
-    elif status == "subscribed" and not reason:
-        latest.append("快递100 已开始跟踪，有新的物流轨迹会发到这里")
-    elif status != "subscribed":
-        latest.append("暂无物流轨迹")
-    elements.extend(({"tag": "hr"}, {"tag": "markdown", "content": "<br>".join(latest)}))
-    if len(tracks) > 1:
-        shown = tracks[1:11]
-        history = [f"**此前轨迹 · {len(tracks) - 1} 条**"]
-        history.extend(
-            f"**{markdown_text(when) or '时间未知'}**<br>{markdown_text(detail)}"
-            for when, detail in shown
-        )
-        if len(tracks) - 1 > len(shown):
-            history.append(f"…另有 {len(tracks) - 1 - len(shown)} 条更早轨迹，可用 show 命令查看")
-        elements.extend(({"tag": "hr"}, {"tag": "markdown", "content": "\n\n".join(history)}))
+    if note:
+        elements.append({"tag": "markdown", "text_size": "heading",
+                         "content": f"**{markdown_text(note)}**"})
+    elements.append({"tag": "markdown", "content": f"单号  `{number}`"})
+    if status != "subscribed":
+        block = []
+        if reason:
+            block.append(markdown_text(reason))
+        if tracks:
+            when, detail = tracks[0]
+            block.extend((f"**{markdown_text(when) or '时间未知'}**", markdown_text(detail)))
+        else:
+            block.append("暂无物流轨迹")
+        elements.extend(({"tag": "hr"}, {"tag": "markdown", "content": "<br>".join(block)}))
+        if len(tracks) > 1:
+            shown = tracks[1:11]
+            history = [f"**此前轨迹 · {len(tracks) - 1} 条**"]
+            history.extend(
+                f"**{markdown_text(when) or '时间未知'}**<br>{markdown_text(detail)}"
+                for when, detail in shown
+            )
+            if len(tracks) - 1 > len(shown):
+                history.append(f"…另有 {len(tracks) - 1 - len(shown)} 条更早轨迹，可用 show 命令查看")
+            elements.extend(({"tag": "hr"}, {"tag": "markdown", "content": "\n\n".join(history)}))
     elements.extend(({"tag": "hr"}, {"tag": "markdown", "content": f"*{footer}*"}))
     card = {
         "schema": "2.0",
         "header": {
             "template": color,
             "title": {"tag": "plain_text", "content": title},
-            "subtitle": {"tag": "plain_text", "content": subtitle},
         },
         "body": {"elements": elements},
     }
-    text_blocks = [" · ".join(filter(None, (label, note))),
-                   f"单号 {number}" + (f" · {CARRIERS.get(carrier, carrier)}" if carrier else "")]
+    text_blocks = [" · ".join(filter(None, (label, note))), f"单号 {number}"]
     if reason:
         text_blocks.append(reason)
     text_blocks.extend(f"{when or '时间未知'}\n{detail}" for when, detail in tracks)
