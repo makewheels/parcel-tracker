@@ -1,0 +1,41 @@
+#!/bin/bash
+# 自动部署 parcel-tracker：本地检查 GitHub 有没有新提交，有就部署到阿里云 FC。
+# 由 Hermes 定时任务每 10 分钟调用；只在真的部署时输出（无输出 = 无事发生）。
+set -uo pipefail
+cd "$(dirname "$0")/.." || exit 1
+
+git fetch origin main --quiet 2>/dev/null || { echo "⚠️ git fetch 失败，跳过本轮"; exit 0; }
+local_sha=$(git rev-parse HEAD)
+remote_sha=$(git rev-parse origin/main)
+[ "$local_sha" = "$remote_sha" ] && exit 0
+
+if ! git pull --ff-only --quiet; then
+  echo "⚠️ 本地有未合并改动，无法自动拉取（HEAD ${local_sha:0:7}，远端 ${remote_sha:0:7}）"
+  exit 0
+fi
+
+env_file=$(mktemp /tmp/parcel-deploy-env.XXXXXX)
+python3 - <<'EOF' > "$env_file"
+import json, pathlib, shlex, subprocess
+fn = json.loads(subprocess.check_output(["aliyun", "fc", "get-function", "--function-name", "parcel-tracker"]))
+for key, value in (fn.get("environmentVariables") or {}).items():
+    print(f"export {key}={shlex.quote(value)}")
+print("export PARCEL_ROLE=" + shlex.quote(fn["role"]))
+cfg = json.loads((pathlib.Path.home() / ".aliyun/config.json").read_text())
+profile = next((p for p in cfg.get("profiles", []) if p.get("name") == cfg.get("current")), cfg["profiles"][0])
+print("export ALIBABA_CLOUD_ACCESS_KEY_ID=" + shlex.quote(profile["access_key_id"]))
+print("export ALIBABA_CLOUD_ACCESS_KEY_SECRET=" + shlex.quote(profile["access_key_secret"]))
+EOF
+chmod 600 "$env_file"
+# shellcheck disable=SC1090
+source "$env_file"
+rm -f "$env_file"
+
+if out=$(uv run --quiet deploy.py --role "$PARCEL_ROLE" 2>&1); then
+  echo "✅ 已自动部署 ${local_sha:0:7} → ${remote_sha:0:7}"
+  echo "$out" | tail -2
+else
+  echo "❌ 自动部署失败（${remote_sha:0:7}）"
+  echo "$out" | tail -15
+  exit 1
+fi
