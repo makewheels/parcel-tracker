@@ -289,21 +289,12 @@ def format_notice(note, carrier, number, status, reason, tracks, sent_at=None):
         if reason:
             block.append(markdown_text(reason))
         if tracks:
-            when, detail = tracks[0]
-            block.extend((f"**{markdown_text(when) or '时间未知'}**", markdown_text(detail)))
+            # 只发最近两条轨迹，更早的不在卡片里展开
+            for when, detail in tracks[:2]:
+                block.extend((f"**{markdown_text(when) or '时间未知'}**", markdown_text(detail)))
         else:
             block.append("暂无物流轨迹")
         elements.extend(({"tag": "hr"}, {"tag": "markdown", "content": "<br>".join(block)}))
-        if len(tracks) > 1:
-            shown = tracks[1:11]
-            history = [f"**此前轨迹 · {len(tracks) - 1} 条**"]
-            history.extend(
-                f"**{markdown_text(when) or '时间未知'}**<br>{markdown_text(detail)}"
-                for when, detail in shown
-            )
-            if len(tracks) - 1 > len(shown):
-                history.append(f"…另有 {len(tracks) - 1 - len(shown)} 条更早轨迹，可用 show 命令查看")
-            elements.extend(({"tag": "hr"}, {"tag": "markdown", "content": "\n\n".join(history)}))
     elements.extend(({"tag": "hr"}, {"tag": "markdown", "content": f"*{footer}*"}))
     card = {
         "schema": "2.0",
