@@ -2,6 +2,7 @@
 # 自动部署 parcel-tracker：本地检查 GitHub 有没有新提交，有就部署到阿里云 FC。
 # 由 Hermes 定时任务每 10 分钟调用；只在真的部署时输出（无输出 = 无事发生）。
 set -uo pipefail
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 cd "$(dirname "$0")/.." || exit 1
 
 state=".git/parcel-deployed-sha"
