@@ -21,10 +21,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 安装 uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
 
@@ -43,6 +43,7 @@ jobs:
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
           FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
         run: |
+          set -euo pipefail
           uv run --quiet deploy.py --role "$PARCEL_ROLE" | tee url.txt
           echo "### 函数地址" >> "$GITHUB_STEP_SUMMARY"
           cat url.txt >> "$GITHUB_STEP_SUMMARY"

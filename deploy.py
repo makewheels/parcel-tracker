@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -56,6 +57,21 @@ def package():
             shutil.rmtree(build)
 
 
+def call_with_retry(func, attempts=4, delay=3):
+    """FC 接口偶发写超时/连接中断，重试几次；4xx 这类配置错误不重试。"""
+    for attempt in range(1, attempts + 1):
+        try:
+            return func()
+        except Exception as error:  # noqa: BLE001
+            status = getattr(error, "status_code", None)
+            if status is not None and 400 <= int(status) < 500:
+                raise
+            if attempt == attempts:
+                raise
+            print(f"第 {attempt} 次调用失败（{type(error).__name__}），{delay * attempt}s 后重试", flush=True)
+            time.sleep(delay * attempt)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--region", default="cn-beijing")
@@ -79,7 +95,7 @@ def main():
     )
     client = Client(config)
     code = package()
-    runtime = RuntimeOptions(connect_timeout=15000, read_timeout=120000)
+    runtime = RuntimeOptions(connect_timeout=30000, read_timeout=180000)
     try:
         client.get_function(args.name, fc.GetFunctionRequest())
     except Exception as error:
@@ -90,12 +106,12 @@ def main():
             role=args.role, cpu=0.1, memory_size=256, disk_size=512, timeout=30,
             instance_concurrency=1, internet_access=True, environment_variables=environment,
         ))
-        client.create_function_with_options(request, {}, runtime)
+        call_with_retry(lambda: client.create_function_with_options(request, {}, runtime))
     else:
         request = fc.UpdateFunctionRequest(body=fc.UpdateFunctionInput(
             code=code, role=args.role, environment_variables=environment,
         ))
-        client.update_function_with_options(args.name, request, {}, runtime)
+        call_with_retry(lambda: client.update_function_with_options(args.name, request, {}, runtime))
     trigger = "http"
     try:
         result = client.get_trigger(args.name, trigger)
