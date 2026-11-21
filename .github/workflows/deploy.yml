@@ -1,0 +1,48 @@
+name: deploy-fc
+
+on:
+  workflow_dispatch:          # 手动触发（网页 / gh workflow run）
+  push:
+    branches: [main]
+    paths:                    # 只在这几类文件变动时自动部署
+      - "fc/**"
+      - "deploy.py"
+      - ".github/workflows/deploy.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-fc
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: 部署到阿里云函数计算
+        env:
+          ALIBABA_CLOUD_ACCESS_KEY_ID: ${{ secrets.ALIBABA_CLOUD_ACCESS_KEY_ID }}
+          ALIBABA_CLOUD_ACCESS_KEY_SECRET: ${{ secrets.ALIBABA_CLOUD_ACCESS_KEY_SECRET }}
+          PARCEL_ROLE: ${{ secrets.PARCEL_ROLE }}
+          KUAIDI100_APPCODE: ${{ secrets.KUAIDI100_APPCODE }}
+          PARCEL_API_TOKEN: ${{ secrets.PARCEL_API_TOKEN }}
+          PARCEL_CALLBACK_SECRET: ${{ secrets.PARCEL_CALLBACK_SECRET }}
+          TABLESTORE_ENDPOINT: ${{ secrets.TABLESTORE_ENDPOINT }}
+          TABLESTORE_INSTANCE: ${{ secrets.TABLESTORE_INSTANCE }}
+          TABLESTORE_TABLE: ${{ secrets.TABLESTORE_TABLE }}
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
+        run: |
+          uv run --quiet deploy.py --role "$PARCEL_ROLE" | tee url.txt
+          echo "### 函数地址" >> "$GITHUB_STEP_SUMMARY"
+          cat url.txt >> "$GITHUB_STEP_SUMMARY"
