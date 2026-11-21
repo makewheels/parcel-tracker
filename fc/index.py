@@ -221,34 +221,59 @@ def markdown_text(value):
     return re.sub(r"([\\`*_~\[\]()#|])", r"\\\1", escape(" ".join(value.split()), quote=False))
 
 
+def merge_tracks(stored, incoming):
+    """合并新旧轨迹：按（时间, 内容）去重，时间新的在前。
+
+    快递100 有时推增量（append）、有时推全量（override），统一按合并处理可以保证
+    订阅期内收到的所有节点都留在库里，不会被后续推送覆盖掉。
+    """
+    seen, merged = set(), []
+    for when, detail in list(incoming) + list(stored):
+        key = (when, detail)
+        if key in seen or not (when or detail):
+            continue
+        seen.add(key)
+        merged.append((when, detail))
+    merged.sort(key=lambda item: item[0], reverse=True)
+    return merged
+
+
 def format_notice(note, carrier, number, status, reason, tracks, sent_at=None):
     label, color = {
         "subscribed": ("订阅成功", "green"),
         "shutdown": ("已签收", "green"),
         "abort": ("跟踪中止", "orange"),
     }.get(status, ("最新动态", "blue"))
-    title = f"📦 {note}"
-    subtitle = " · ".join(filter(None, (CARRIERS.get(carrier, carrier), number)))
+    # 卡片标题只放状态（订阅成功 / 最新动态 / 已签收），备注名做副标题，单号进正文。
+    title = label
+    subtitle = note or ""
     if sent_at is None:
         sent_at = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
     footer = f"推送时间  {sent_at}"
 
     elements = []
-    latest = [f"**{label}**"]
+    head = [f"单号 {number}" + (f" · {CARRIERS.get(carrier, carrier)}" if carrier else "")]
+    elements.append({"tag": "markdown", "content": "<br>".join(head)})
+    latest = []
     if reason:
         latest.append(markdown_text(reason))
     if tracks:
         when, detail = tracks[0]
         latest.extend((f"**{markdown_text(when) or '时间未知'}**", markdown_text(detail)))
+    elif status == "subscribed" and not reason:
+        latest.append("快递100 已开始跟踪，有新的物流轨迹会发到这里")
     elif status != "subscribed":
         latest.append("暂无物流轨迹")
-    elements.append({"tag": "markdown", "content": "<br>".join(latest)})
+    elements.extend(({"tag": "hr"}, {"tag": "markdown", "content": "<br>".join(latest)}))
     if len(tracks) > 1:
+        shown = tracks[1:11]
         history = [f"**此前轨迹 · {len(tracks) - 1} 条**"]
         history.extend(
             f"**{markdown_text(when) or '时间未知'}**<br>{markdown_text(detail)}"
-            for when, detail in tracks[1:]
+            for when, detail in shown
         )
+        if len(tracks) - 1 > len(shown):
+            history.append(f"…另有 {len(tracks) - 1 - len(shown)} 条更早轨迹，可用 show 命令查看")
         elements.extend(({"tag": "hr"}, {"tag": "markdown", "content": "\n\n".join(history)}))
     elements.extend(({"tag": "hr"}, {"tag": "markdown", "content": f"*{footer}*"}))
     card = {
@@ -260,7 +285,8 @@ def format_notice(note, carrier, number, status, reason, tracks, sent_at=None):
         },
         "body": {"elements": elements},
     }
-    text_blocks = [f"{title} · {label}\n{subtitle}"]
+    text_blocks = [" · ".join(filter(None, (label, note))),
+                   f"单号 {number}" + (f" · {CARRIERS.get(carrier, carrier)}" if carrier else "")]
     if reason:
         text_blocks.append(reason)
     text_blocks.extend(f"{when or '时间未知'}\n{detail}" for when, detail in tracks)
@@ -318,10 +344,11 @@ def callback(store, data, number):
     if status == "abort" and data.get("comNew") and data["comNew"] != data.get("comOld"):
         return respond(200, "成功")
 
-    tracks = [(item.get("ftime") or item.get("time") or "", item.get("context") or "")
-              for item in result.get("data") or []]
-    if not tracks and status == "abort" and row.get("tracks"):
-        tracks = json.loads(row["tracks"])
+    incoming = [(item.get("ftime") or item.get("time") or "", item.get("context") or "")
+                for item in result.get("data") or []]
+    stored = json.loads(row.get("tracks") or "[]")
+    # 增量推送只带新节点，全量推送带整条轨迹：合并去重，历史一条都不丢。
+    tracks = merge_tracks(stored, incoming)
     carrier = result.get("com") or row.get("company") or ""
     encoded = json.dumps(tracks, ensure_ascii=False)
     event_id = hashlib.sha256(f"{number}\n{status}\n{encoded}".encode()).hexdigest()
