@@ -69,8 +69,10 @@ def subscribe(store, event, data, number):
 
     row = store.get(number)
     state = parcel_state(row) if row else None
+    force = bool(data.get("force"))
     # 跟踪中止（abort）的运单允许重新订阅：快递100 要求 abort 后隔 30 分钟再提交。
-    if row and row["subscription"] == "active" and state != "aborted":
+    # force=true 时即使仍在跟踪也重新提交（例如补手机尾号）。
+    if row and row["subscription"] == "active" and state != "aborted" and not force:
         updates = {}
         if data.get("name") is not None:
             updates["name"] = name

@@ -90,6 +90,7 @@ def main():
     add.add_argument("--phone", default="", help="承运商要求的预留电话或虚拟号后四位")
     add.add_argument("--kind", choices=KINDS, default="buy",
                      help="运单类型：buy 买的（默认）、return 退货、send 寄出、other 其他")
+    add.add_argument("--force", action="store_true", help="已在跟踪也重新提交（例如补手机尾号）")
     note = commands.add_parser("note", help="修改已录入运单的备注")
     note.add_argument("number")
     note.add_argument("name", nargs="?", default="")
