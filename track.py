@@ -60,6 +60,14 @@ def print_result(result):
                 print(("  " if len(kinds) > 1 else "") + format_parcel(parcel))
 
 
+def config_value(key, default=""):
+    """读本机配置里的单个值（配置不存在或读坏了就返回默认值）。"""
+    try:
+        return json.loads(CONFIG.read_text()).get(key) or default
+    except (OSError, ValueError):
+        return default
+
+
 def call(path, payload):
     """调云端服务，返回解析后的 dict（HTTP 4xx 也按 JSON 处理）。"""
     config = json.loads(CONFIG.read_text()) if CONFIG.exists() else {}
@@ -130,6 +138,9 @@ def main():
         payload = vars(args).copy()
         command = payload.pop("command")
         as_json = payload.pop("json")
+        # 中通/顺丰订阅需要手机尾号：命令行没给就用配置里的默认值
+        if command in ("add", "subscribe") and not payload.get("phone"):
+            payload["phone"] = config_value("default_phone_tail")
         if command == "board":
             status = payload.get("status", "active")
             list_req = {"status": payload.get("status", "active")}
