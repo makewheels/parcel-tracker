@@ -1,10 +1,14 @@
-"""运单记录和条件更新。"""
+"""运单状态和飞书发送记录。"""
 import os
+import time
+import uuid
 
 from tablestore import (
     ComparatorType, Condition, Direction, INF_MAX, INF_MIN, OTSClient, OTSServiceError, Row,
     RowExistenceExpectation, SingleColumnCondition,
 )
+
+NOTIFICATION_TABLE = "notification_logs"
 
 
 class Store:
@@ -62,3 +66,19 @@ class Store:
             if error.get_error_code() == "OTSConditionCheckFail":
                 return False
             raise
+
+    def start_notification(self, number, notification_type, event_id):
+        key = [
+            ("number", number),
+            ("started_at", time.time_ns() // 1_000_000),
+            ("attempt_id", uuid.uuid4().hex),
+        ]
+        row = Row(key, [("notification_type", notification_type), ("event_id", event_id),
+                        ("status", "unknown")])
+        self.client.put_row(NOTIFICATION_TABLE, row, Condition(RowExistenceExpectation.IGNORE))
+        return key
+
+    def finish_notification(self, key, result):
+        columns = {**result, "finished_at": time.time_ns() // 1_000_000}
+        row = Row(key, {"PUT": list(columns.items())})
+        self.client.update_row(NOTIFICATION_TABLE, row, Condition(RowExistenceExpectation.EXPECT_EXIST))

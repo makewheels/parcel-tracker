@@ -36,8 +36,8 @@ CLI 入口是 [track.py](track.py)，服务端路由和快递100回调在 [fc/in
 ## 部署
 
 1. 在阿里云市场开通 [快递100订阅推送](https://market.aliyun.com/detail/cmapi00072132)，准备该商品的 AppCode。
-2. 在函数计算所在地域创建 Tablestore CU 模式容量型实例，建一张宽表 `parcels`。唯一主键为 STRING 类型的 `number`，最大版本数为 1，预留读写吞吐量为 0。
-3. 创建一个可以由 `fc.aliyuncs.com` 扮演的 RAM 角色，只允许对 `parcels` 表执行 `ots:GetRow`、`ots:GetRange`、`ots:PutRow` 和 `ots:UpdateRow`。函数使用角色自动注入的短期凭据。
+2. 在函数计算所在地域创建 Tablestore CU 模式容量型实例。建宽表 `parcels`，主键是 `number`（STRING）。再建宽表 `notification_logs`，主键依次是 `number`（STRING）、`started_at`（INTEGER）和 `attempt_id`（STRING）。两张表都设置最大版本数为 1，预留读写吞吐量为 0，数据永不过期。
+3. 创建一个可以由 `fc.aliyuncs.com` 扮演的 RAM 角色。授予 `parcels` 表的 `ots:GetRow`、`ots:GetRange`、`ots:PutRow` 和 `ots:UpdateRow`，以及 `notification_logs` 表的 `ots:PutRow` 和 `ots:UpdateRow`。函数使用角色自动注入的短期凭据。
 4. 准备下面的环境变量，通过密钥管理工具注入部署进程。运行 `uv run deploy.py --role <角色 ARN>` 编译依赖、部署函数和创建 POST 触发器。地域默认为 `cn-beijing`。部署身份需要函数及触发器的读取、创建、更新权限和使用该 RAM 角色的权限。
 5. 把 HTTPS 触发器地址和录单令牌配置到客户端。正式使用时可为函数绑定已备案的 HTTPS 自定义域名，客户端使用这个域名提交订阅。
 
@@ -54,6 +54,20 @@ CLI 入口是 [track.py](track.py)，服务端路由和快递100回调在 [fc/in
 | `FEISHU_APP_ID`, `FEISHU_APP_SECRET`, `FEISHU_CHAT_ID` | 使用应用机器人发消息时的应用凭据和目标会话 |
 
 飞书可以配置自定义机器人或应用机器人。应用机器人需具备发送消息权限，并能在目标会话发消息。函数先写入最新轨迹，再发一条完整消息。飞书确认成功后，函数记录已发送并确认回调；重复到达的同一版本通常会跳过。飞书应用机器人还使用消息 API 的幂等键处理重试。
+
+## 查询飞书发送记录
+
+在 Tablestore 控制台打开 `notification_logs`，按主键 `number` 查询运单。每次发送尝试是一行，同一通知的各次尝试共用 `event_id`，各自拥有独立的 `attempt_id`。
+
+| 字段 | 含义 |
+| --- | --- |
+| `notification_type` | `subscribed` 为订阅确认，`polling` 或 `updateall` 为物流更新，`shutdown` 为签收，`abort` 为跟踪中止 |
+| `started_at`、`finished_at` | 尝试开始和完成的 Unix 时间戳，单位为毫秒 |
+| `status` | `sent` 为飞书确认成功，`failed` 为发送失败，`unknown` 为结果未知 |
+| `message_id` | 飞书应用机器人返回的消息 ID。自定义机器人成功时通常没有此字段 |
+| `error_code` | 失败或结果未知时的错误码，例如 `send:http_429`、`send:TimeoutError` 或带 `auth:` 前缀的认证错误 |
+
+函数先创建记录，再请求飞书。`unknown` 且没有 `finished_at` 时，发送可能仍在进行，也可能是处理被中断或结果回写失败。表内只保存发送元数据，逐条记录从启用后开始积累。
 
 ## 许可
 

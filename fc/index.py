@@ -157,7 +157,7 @@ def send_subscription_confirmation(store, number, row, message):
     event_id = hashlib.sha256(f"subscription\n{number}\n{row['attempt']}".encode()).hexdigest()
     condition = ("confirmation_retry_at", deadline)
     try:
-        notify(card, text, event_id)
+        notify_with_log(store, number, "subscribed", event_id, card, text)
     except Exception as error:
         store.update(number, {"confirmation_retry_at": 0}, condition)
         print("订阅确认发送失败", type(error).__name__)
@@ -314,6 +314,56 @@ def format_notice(note, carrier, number, status, reason, tracks, sent_at=None):
     return card, "\n\n".join(text_blocks)
 
 
+class FeishuError(RuntimeError):
+    def __init__(self, status, code):
+        super().__init__(code)
+        self.status = status
+        self.code = code
+
+
+def feishu_post(url, payload, headers=None, *, stage="send"):
+    uncertain = "unknown" if stage == "send" else "failed"
+    try:
+        response = post_json(url, payload, headers)
+    except HTTPError as error:
+        error.close()
+        rejected = 400 <= error.code < 500 and error.code != 408
+        raise FeishuError("failed" if rejected else uncertain,
+                          f"{stage}:http_{error.code}") from error
+    except (OSError, ValueError) as error:
+        cause = getattr(error, "reason", error)
+        raise FeishuError(uncertain, f"{stage}:{type(cause).__name__}") from error
+    code = response.get("code", response.get("StatusCode")) if isinstance(response, dict) else None
+    if type(code) is not int:
+        raise FeishuError(uncertain, f"{stage}:invalid_response")
+    if code != 0:
+        raise FeishuError("failed", f"{stage}:{code}")
+    return response
+
+
+def notify_with_log(store, number, notification_type, event_id, card, message):
+    key = store.start_notification(number, notification_type, event_id)
+    result = {"status": "unknown"}
+    try:
+        message_id = notify(card, message, event_id)
+    except FeishuError as error:
+        result.update(status=error.status, error_code=error.code)
+        raise
+    except Exception as error:
+        result["error_code"] = type(error).__name__
+        raise
+    else:
+        result["status"] = "sent"
+        if message_id:
+            result["message_id"] = message_id
+    finally:
+        try:
+            store.finish_notification(key, result)
+        except Exception as error:
+            # 保留已写入的「结果未知」记录，避免因日志回写失败重发已成功的消息。
+            print("飞书发送结果回写失败", key[-1][1], result["status"], type(error).__name__)
+
+
 def notify(card, message, event_id):
     webhook = os.getenv("FEISHU_WEBHOOK")
     if webhook:
@@ -327,13 +377,14 @@ def notify(card, message, event_id):
             key = f"{timestamp}\n{secret}".encode()
             data["timestamp"] = timestamp
             data["sign"] = base64.b64encode(hmac.digest(key, b"", "sha256")).decode()
-        result = post_json(webhook, data)
-        if result.get("code", result.get("StatusCode")) != 0:
-            raise RuntimeError("Feishu webhook rejected message")
-        return
-    token = post_json("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", {
+        feishu_post(webhook, data)
+        return None
+    auth = feishu_post("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", {
         "app_id": os.environ["FEISHU_APP_ID"], "app_secret": os.environ["FEISHU_APP_SECRET"],
-    })
+    }, stage="auth")
+    token = auth.get("tenant_access_token")
+    if not token:
+        raise FeishuError("failed", "auth:missing_token")
     data = {
         "receive_id": os.environ["FEISHU_CHAT_ID"], "msg_type": "interactive",
         "content": json.dumps(card, ensure_ascii=False, separators=(",", ":")),
@@ -341,10 +392,10 @@ def notify(card, message, event_id):
     }
     if len(json.dumps(data, ensure_ascii=False).encode()) > 29_000:
         data.update(msg_type="text", content=json.dumps({"text": message}, ensure_ascii=False))
-    response = post_json("https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id", data,
-                         {"Authorization": f"Bearer {token['tenant_access_token']}"})
-    if response.get("code") != 0:
-        raise RuntimeError("Feishu app rejected message")
+    response = feishu_post("https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id", data,
+                           {"Authorization": f"Bearer {token}"})
+    metadata = response.get("data")
+    return metadata.get("message_id") if isinstance(metadata, dict) else None
 
 
 def callback(store, data, number):
@@ -376,7 +427,8 @@ def callback(store, data, number):
     if row["delivery_until"] > now:
         return respond(503, "回调正在处理")
     lock = uuid.uuid4().hex
-    extra = {"abort_reason": reason[:300]} if status == "abort" and reason else {}
+    reason = (data.get("message") or "") if status == "abort" else ""
+    extra = {"abort_reason": reason[:300]} if reason else {}
     if not store.update(number, {"delivery_lock": lock, "delivery_until": now + 45,
                                  "tracks": encoded, "subscription": "active",
                                  "monitor_status": status, "company": carrier, **extra},
@@ -384,14 +436,13 @@ def callback(store, data, number):
         return respond(503, "回调正在处理")
 
     note = row.get("name") or "快递提醒"
-    reason = (data.get("message") or "") if status == "abort" else ""
     try:
         # 停止提醒和回调共用同一运单锁。取得锁后读取最新的提醒设置。
         if store.get(number).get("notification_paused"):
             store.update(number, {"handled_event": event_id, "delivery_until": 0}, ("delivery_lock", lock))
             return respond(200, "成功")
         card, message = format_notice(note, carrier, number, status, reason, tracks)
-        notify(card, message, event_id)
+        notify_with_log(store, number, status, event_id, card, message)
     except Exception:
         store.update(number, {"delivery_until": 0}, ("delivery_lock", lock))
         raise
