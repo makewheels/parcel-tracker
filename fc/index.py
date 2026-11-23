@@ -62,8 +62,8 @@ def subscribe(store, event, data, number):
         return respond(400, "运单类型只能是 buy、return、send、other")
     if not re.fullmatch(r"[a-z0-9]{0,40}", company) or len(name) > 120 or len(phone) > 40:
         return respond(400, "请检查快递公司编码、备注或电话号码")
-    if not phone and company in {"shunfeng", "shunfengkuaiyun"}:
-        return respond(400, "顺丰运单需要填写下单时预留的电话号码")
+    if not phone and company in {"shunfeng", "shunfengkuaiyun", "zhongtong"}:
+        return respond(400, "顺丰、中通运单需要填写收件人手机号后四位（快递100 校验用）")
     if not (os.getenv("FEISHU_WEBHOOK") or os.getenv("FEISHU_CHAT_ID")):
         return respond(503, "飞书接收方尚未配置")
 
