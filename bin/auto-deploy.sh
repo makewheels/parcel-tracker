@@ -1,26 +1,32 @@
 #!/bin/bash
-# 自动部署 parcel-tracker：本地检查 GitHub 有没有新提交，有就部署到阿里云 FC。
-# 由 Hermes 定时任务每 10 分钟调用；只在真的部署时输出（无输出 = 无事发生）。
-set -uo pipefail
-export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+# Hermes 定时任务发布 GitHub main 到腾讯云 SCF 和阿里云 FC。
+set -euo pipefail
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 cd "$(dirname "$0")/.." || exit 1
 
-state=".git/parcel-deployed-sha"
-
-# 有远端更新就拉下来（失败不阻塞，仍按本地 HEAD 判断）
-git fetch origin main --quiet 2>/dev/null
-if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main 2>/dev/null)" ]; then
-  git pull --ff-only --quiet || echo "⚠️ 本地有未合并改动，按本地 HEAD 部署"
+git fetch origin main --quiet
+target=$(git rev-parse origin/main)
+git merge --ff-only --quiet "$target"
+if [ "$(git rev-parse HEAD)" != "$target" ] || [ -n "$(git status --porcelain --untracked-files=all -- fc deploy.py)" ]; then
+  echo "部署目录和 GitHub main 不一致"
+  exit 1
 fi
 
-# 判断依据是「上次部署的提交」，不是本地/远端是否相同——
-# 在本地 commit 后直接 push 时，两者相等，远端比对会漏部署。
-target=$(git rev-parse HEAD)
+scf_state=".git/parcel-scf-deployed-sha"
+if [ ! -f "$scf_state" ] || [ "$(cat "$scf_state")" != "$target" ]; then
+  uv run --quiet deploy.py --target tencent
+  echo "$target" > "$scf_state"
+  echo "腾讯云 SCF 已部署 ${target:0:7}"
+fi
+
+state=".git/parcel-deployed-sha"
 if [ -f "$state" ] && [ "$(cat "$state")" = "$target" ]; then
   exit 0
 fi
 
-env_file=$(mktemp /tmp/parcel-deploy-env.XXXXXX)
+temp_dir=${TMPDIR:-$(python3 -c 'import tempfile; print(tempfile.gettempdir())')}
+env_file=$(mktemp "${temp_dir%/}/parcel-deploy-env.XXXXXX")
+trap 'rm -f "$env_file"' EXIT
 python3 - <<'EOF' > "$env_file"
 import json, pathlib, shlex, subprocess
 fn = json.loads(subprocess.check_output(["aliyun", "fc", "get-function", "--function-name", "parcel-tracker"]))
@@ -42,7 +48,6 @@ EOF
 chmod 600 "$env_file"
 # shellcheck disable=SC1090
 source "$env_file"
-rm -f "$env_file"
 
 if out=$(uv run --quiet deploy.py --role "$PARCEL_ROLE" 2>&1); then
   echo "$target" > "$state"

@@ -14,12 +14,20 @@ NOTIFICATION_TABLE = "notification_logs"
 class Store:
     def __init__(self):
         self.table = os.getenv("TABLESTORE_TABLE", "parcels")
+        if os.getenv("TABLESTORE_ACCESS_KEY_ID"):
+            key_id = os.environ["TABLESTORE_ACCESS_KEY_ID"]
+            key_secret = os.environ["TABLESTORE_ACCESS_KEY_SECRET"]
+            token = None
+        else:
+            key_id = os.environ["ALIBABA_CLOUD_ACCESS_KEY_ID"]
+            key_secret = os.environ["ALIBABA_CLOUD_ACCESS_KEY_SECRET"]
+            token = os.environ["ALIBABA_CLOUD_SECURITY_TOKEN"]
         self.client = OTSClient(
             os.environ["TABLESTORE_ENDPOINT"],
-            os.environ["ALIBABA_CLOUD_ACCESS_KEY_ID"],
-            os.environ["ALIBABA_CLOUD_ACCESS_KEY_SECRET"],
+            key_id,
+            key_secret,
             os.environ["TABLESTORE_INSTANCE"],
-            sts_token=os.environ["ALIBABA_CLOUD_SECURITY_TOKEN"],
+            sts_token=token,
         )
 
     def get(self, number):

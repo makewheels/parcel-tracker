@@ -3,7 +3,7 @@
 # requires-python = ">=3.12"
 # dependencies = ["alibabacloud-fc20230330", "oss2"]
 # ///
-"""将代码部署到函数计算 3.0，并输出 HTTP 触发器地址。"""
+"""更新快递服务的阿里云 FC 或腾讯云 SCF 代码。"""
 import argparse
 import base64
 import io
@@ -32,15 +32,15 @@ OPTIONAL = (
 )
 
 
-def package():
+def package(python_version, platform):
     root = Path(tempfile.gettempdir()).resolve()
     build = Path(tempfile.mkdtemp(prefix="parcel-deploy-", dir=root))
     try:
         dependencies = build / "dependencies"
         subprocess.run(
             ["uv", "pip", "install", "--quiet", "--link-mode", "hardlink",
-             "--target", str(dependencies), "--python-version", "3.12",
-             "--python-platform", "x86_64-manylinux_2_28",
+             "--target", str(dependencies), "--python-version", python_version,
+             "--python-platform", platform,
              "-r", str(SOURCE / "requirements.txt")],
             check=True,
         )
@@ -89,16 +89,45 @@ def call_with_retry(func, attempts=4, delay=3):
             time.sleep(delay * attempt)
 
 
+def update_scf(name, region):
+    base = ["tccli", "scf"]
+    target = ["--region", region, "--Namespace", "default", "--FunctionName", name]
+    archive = package("3.10", "x86_64-manylinux_2_17")
+    with tempfile.NamedTemporaryFile(mode="w", prefix="parcel-scf-", suffix=".json") as request:
+        json.dump({
+            "FunctionName": name, "Namespace": "default", "Handler": "scf.handler",
+            "CodeSource": "ZipFile", "Code": {"ZipFile": base64.b64encode(archive).decode()},
+        }, request)
+        request.flush()
+        subprocess.run(base + ["UpdateFunctionCode", "--region", region, "--timeout", "180",
+                               "--cli-input-json", f"file://{request.name}"], check=True)
+    for _ in range(30):
+        result = json.loads(subprocess.check_output(base + ["GetFunction"] + target))
+        if result["Status"] == "Active":
+            return
+        if result["Status"] != "Updating":
+            raise RuntimeError(f"腾讯云函数状态异常（{result['Status']}）")
+        time.sleep(2)
+    raise TimeoutError("腾讯云函数代码更新未完成")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--region", default="cn-beijing")
+    parser.add_argument("--target", choices=("aliyun", "tencent"), default="aliyun")
+    parser.add_argument("--region")
     parser.add_argument("--name", default="parcel-tracker")
-    parser.add_argument("--role", required=True, help="函数的 RAM 角色 ARN")
+    parser.add_argument("--role", help="阿里云函数的 RAM 角色 ARN")
     parser.add_argument("--oss-bucket", default=os.getenv("OSS_BUCKET", ""),
                         help="代码包先传到此 OSS 桶（跨网部署时避免写超时）")
     parser.add_argument("--oss-endpoint", default=os.getenv("OSS_ENDPOINT", ""),
                         help="OSS endpoint，默认 https://oss-cn-beijing.aliyuncs.com")
     args = parser.parse_args()
+    if args.target == "tencent":
+        update_scf(args.name, args.region or "ap-beijing")
+        return
+    if not args.role:
+        parser.error("部署阿里云函数时需要 --role")
+    region = args.region or "cn-beijing"
     missing = [name for name in REQUIRED if not os.environ.get(name)]
     if missing:
         raise SystemExit("缺少变量 " + ", ".join(missing))
@@ -111,11 +140,11 @@ def main():
         access_key_id=os.environ["ALIBABA_CLOUD_ACCESS_KEY_ID"],
         access_key_secret=os.environ["ALIBABA_CLOUD_ACCESS_KEY_SECRET"],
         security_token=os.getenv("ALIBABA_CLOUD_SECURITY_TOKEN"),
-        endpoint=f"fcv3.{args.region}.aliyuncs.com",
-        region_id=args.region,
+        endpoint=f"fcv3.{region}.aliyuncs.com",
+        region_id=region,
     )
     client = Client(config)
-    code = code_location(package(), args.oss_bucket, args.oss_endpoint)
+    code = code_location(package("3.12", "x86_64-manylinux_2_28"), args.oss_bucket, args.oss_endpoint)
     runtime = RuntimeOptions(connect_timeout=30000, read_timeout=180000)
     try:
         client.get_function(args.name, fc.GetFunctionRequest())

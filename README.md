@@ -35,6 +35,12 @@ CLI 入口是 [track.py](track.py)，服务端路由和快递100回调在 [fc/in
 
 ## 部署
 
+生产 CLI 和新订阅指向腾讯云北京区 SCF 的 `parcel-tracker`（Python 3.10，入口 `scf.handler`）。已有快递100订阅可能继续回调阿里云 FC。两套函数共用阿里云 Tablestore。定时发布入口是 [bin/auto-deploy.sh](bin/auto-deploy.sh)，按 GitHub `main` 更新两套代码，并分别记录已发布的提交。
+
+SCF 的 `PARCEL_CALLBACK_BASE_URL` 设为它的 HTTPS 函数 URL。跨云访问表格存储使用 `TABLESTORE_ACCESS_KEY_ID` 和 `TABLESTORE_ACCESS_KEY_SECRET`，运行身份须具备下列两张表的权限。更新 SCF 代码时使用已授权的腾讯云 CLI 身份执行 `uv run deploy.py --target tencent`，函数的环境配置和 URL 随现有资源保留。
+
+### 阿里云 FC
+
 1. 在阿里云市场开通 [快递100订阅推送](https://market.aliyun.com/detail/cmapi00072132)，准备该商品的 AppCode。
 2. 在函数计算所在地域创建 Tablestore CU 模式容量型实例。建宽表 `parcels`，主键是 `number`（STRING）。再建宽表 `notification_logs`，主键依次是 `number`（STRING）、`started_at`（INTEGER）和 `attempt_id`（STRING）。两张表都设置最大版本数为 1，预留读写吞吐量为 0，数据永不过期。
 3. 创建一个可以由 `fc.aliyuncs.com` 扮演的 RAM 角色。授予 `parcels` 表的 `ots:GetRow`、`ots:GetRange`、`ots:PutRow` 和 `ots:UpdateRow`，以及 `notification_logs` 表的 `ots:PutRow` 和 `ots:UpdateRow`。函数使用角色自动注入的短期凭据。
