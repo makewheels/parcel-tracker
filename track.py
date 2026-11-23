@@ -33,6 +33,18 @@ def format_parcel(parcel):
 def print_result(result):
     if "parcel" in result:
         print(format_parcel(result["parcel"]))
+        history = result.get("subscribe_log") or []
+        if history:
+            print("\n订阅记录:")
+            for entry in reversed(history):
+                line = f"  {entry.get('at','')} {entry.get('outcome','')}"
+                if entry.get("company"):
+                    line += f" · {entry['company']}"
+                if entry.get("phone"):
+                    line += f" · {entry['phone']}"
+                print(line)
+                if entry.get("detail"):
+                    print(f"    {entry['detail']}")
         for track in result["tracks"]:
             print(f"\n{track['time'] or '时间未知'}\n{track['detail']}")
         if not result["tracks"]:

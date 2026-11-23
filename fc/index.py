@@ -40,6 +40,23 @@ def respond(code, message, **data):
     }
 
 
+def log_subscribe(store, number, outcome, company="", phone="", detail=""):
+    """把每次订阅动作和快递100 的返回记到运单上（最多留 10 条，手机号只留后四位）。"""
+    row = store.get(number) or {}
+    try:
+        entries = json.loads(row.get("subscribe_log") or "[]")
+    except ValueError:
+        entries = []
+    entries.append({
+        "at": datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S"),
+        "outcome": outcome,
+        "company": company or "自动识别",
+        "phone": f"****{phone[-4:]}" if phone else "",
+        "detail": (detail or "")[:200],
+    })
+    store.update(number, {"subscribe_log": json.dumps(entries[-10:], ensure_ascii=False)})
+
+
 def post_json(url, payload, headers=None, timeout=6):
     request = Request(url, data=json.dumps(payload, ensure_ascii=False).encode(),
                       headers={"Content-Type": "application/json", **(headers or {})})
@@ -83,6 +100,7 @@ def subscribe(store, event, data, number):
             row.update(updates)
         label = "已在跟踪" if state == "active" else STATES[state]
         message = label + (f" · {row['name']}" if row.get("name") else "")
+        log_subscribe(store, number, "跳过", row.get("company") or "", phone, f"{label}，未重新提交")
         if row.get("confirmation_retry_at", -1) >= 0:
             return send_subscription_confirmation(store, number, row, message)
         return respond(200, message)
@@ -120,9 +138,12 @@ def subscribe(store, event, data, number):
         except ValueError:
             result = {"returnCode": error.code}
     except (OSError, ValueError):
+        log_subscribe(store, number, "网络错误", company, phone, "快递100 未响应")
         return respond(502, "快递100未确认订阅，稍后可再试")
 
     accepted = result.get("result") is True and str(result.get("returnCode")) == "200"
+    log_subscribe(store, number, "成功" if accepted else "被拒", company, phone,
+                  f"returnCode={result.get('returnCode')} message={result.get('message') or ''}")
     condition = ("attempt", version)
     if accepted:
         if not store.update(number, {"subscription": "active", "confirmation_retry_at": 0}, condition):
@@ -491,7 +512,12 @@ def handler(event, context):
             if not row:
                 return respond(404, "运单未录入")
             tracks = [{"time": when, "detail": detail} for when, detail in json.loads(row.get("tracks") or "[]")]
-            return respond(200, "查询成功", parcel=parcel_details(number, row), tracks=tracks)
+            try:
+                history = json.loads(row.get("subscribe_log") or "[]")
+            except ValueError:
+                history = []
+            return respond(200, "查询成功", parcel=parcel_details(number, row), tracks=tracks,
+                           subscribe_log=history)
         if path in {"/unsubscribe", "/resume"}:
             return set_paused(store, number, path == "/unsubscribe")
         name = (data.get("name") or "").strip()
