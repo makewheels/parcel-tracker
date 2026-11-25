@@ -21,6 +21,10 @@ CARRIERS = {
     "yuantong": "圆通速递", "zhongtong": "中通快递", "shentong": "申通快递",
     "shunfeng": "顺丰速运", "shunfengkuaiyun": "顺丰快运", "yunda": "韵达速递",
     "jtexpress": "极兔速递", "jd": "京东物流", "ems": "EMS",
+    "youzhengguonei": "邮政快递包裹", "huitongkuaidi": "百世快递", "tiantian": "天天快递",
+    "debangwuliu": "德邦物流", "debangkuaidi": "德邦快递", "annengwuliu": "安能物流",
+    "kuayue": "跨越速运", "youshuwuliu": "优速快递", "fengwang": "丰网速运",
+    "cainiao": "菜鸟速递", "danniao": "丹鸟", "yimidida": "壹米滴答",
 }
 STATES = {
     "active": "跟踪中", "completed": "已签收", "paused": "已暂停提醒",
@@ -296,8 +300,10 @@ def format_notice(note, carrier, number, status, reason, tracks, sent_at=None):
         "shutdown": ("已签收", "green"),
         "abort": ("跟踪中止", "orange"),
     }.get(status, ("最新动态", "blue"))
-    # 标题只放状态；正文只有两行——名字（突出显示）+ 单号；底部只留发送时间。
+    # 标题只放状态；正文是名字（突出显示）、快递公司（知道才显示）、单号；底部只留发送时间。
     title = label
+    code = (carrier or "").strip().lower()
+    carrier_name = CARRIERS.get(ALIASES.get(code, code), carrier or "")
     if sent_at is None:
         sent_at = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
     footer = f"发送时间  {sent_at}"
@@ -306,6 +312,8 @@ def format_notice(note, carrier, number, status, reason, tracks, sent_at=None):
     if note:
         elements.append({"tag": "markdown", "text_size": "heading",
                          "content": f"**{markdown_text(note)}**"})
+    if carrier_name:
+        elements.append({"tag": "markdown", "content": f"快递公司  {markdown_text(carrier_name)}"})
     elements.append({"tag": "markdown", "content": f"单号  `{number}`"})
     if status != "subscribed":
         block = []
@@ -327,7 +335,10 @@ def format_notice(note, carrier, number, status, reason, tracks, sent_at=None):
         },
         "body": {"elements": elements},
     }
-    text_blocks = [" · ".join(filter(None, (label, note))), f"单号 {number}"]
+    text_blocks = [" · ".join(filter(None, (label, note)))]
+    if carrier_name:
+        text_blocks.append(f"快递公司 {carrier_name}")
+    text_blocks.append(f"单号 {number}")
     if reason:
         text_blocks.append(reason)
     text_blocks.extend(f"{when or '时间未知'}\n{detail}" for when, detail in tracks)
