@@ -1,0 +1,60 @@
+name: Deploy parcel-tracker to Tencent SCF
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'fc/**'
+      - deploy.py
+      - bin/auto-deploy.sh
+      - .github/workflows/deploy.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: parcel-tracker-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v8.3.2
+
+      - name: 配置 tccli 凭据
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.tccli"
+          umask 077
+          printf '{"secretId":"%s","secretKey":"%s"}' \
+            '${{ secrets.TENCENTCLOUD_SECRET_ID }}' \
+            '${{ secrets.TENCENTCLOUD_SECRET_KEY }}' > "$HOME/.tccli/default.credential"
+
+      - name: 安装 tccli
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv tool install tccli
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: 发布函数代码
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.local/bin:$PATH"
+          uv run --quiet deploy.py --target tencent
+
+      - name: 核对函数状态
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.local/bin:$PATH"
+          tccli scf GetFunction --FunctionName parcel-tracker --Namespace default \
+            --region ap-beijing --output json |
+            python3 -c "import sys,json; d=json.load(sys.stdin); print('状态', d['Status'], '| 运行时', d['Runtime'], '| 更新时间', d['ModTime'])"
