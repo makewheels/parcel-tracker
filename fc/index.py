@@ -432,6 +432,22 @@ def notify(card, message, event_id):
     return metadata.get("message_id") if isinstance(metadata, dict) else None
 
 
+def log_push(store, number, row, status, incoming=None, added=None, outcome="处理"):
+    """记录每次回调推送（最多留 20 条），包含被忽略的那些。"""
+    try:
+        entries = json.loads(row.get("push_log") or "[]")
+    except ValueError:
+        entries = []
+    entries.append({
+        "at": datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S"),
+        "status": status or "",
+        "outcome": outcome,
+        "nodes": len(incoming or []),
+        "added": added,
+    })
+    return entries[-20:]
+
+
 def callback(store, data, number):
     result = data.get("lastResult") or {}
     if result.get("nu") and result["nu"].upper() != number:
@@ -443,8 +459,12 @@ def callback(store, data, number):
     if not row:
         return respond(404, "运单未录入")
     if row.get("monitor_status") == "shutdown" and status != "shutdown":
+        store.update(number, {"push_log": json.dumps(
+            log_push(store, number, row, status, outcome="忽略·已签收"), ensure_ascii=False)})
         return respond(200, "成功")
     if status == "abort" and data.get("comNew") and data["comNew"] != data.get("comOld"):
+        store.update(number, {"push_log": json.dumps(
+            log_push(store, number, row, status, outcome="忽略·承运商变更"), ensure_ascii=False)})
         return respond(200, "成功")
 
     incoming = [(item.get("ftime") or item.get("time") or "", item.get("context") or "")
@@ -456,16 +476,22 @@ def callback(store, data, number):
     encoded = json.dumps(tracks, ensure_ascii=False)
     event_id = hashlib.sha256(f"{number}\n{status}\n{encoded}".encode()).hexdigest()
     if (row.get("handled_event") or row.get("sent")) == event_id:
+        store.update(number, {"push_log": json.dumps(
+            log_push(store, number, row, status, incoming, 0, "忽略·重复"), ensure_ascii=False)})
         return respond(200, "成功")
     now = int(time.time())
     if row["delivery_until"] > now:
+        store.update(number, {"push_log": json.dumps(
+            log_push(store, number, row, status, incoming, 0, "忽略·处理中"), ensure_ascii=False)})
         return respond(503, "回调正在处理")
     lock = uuid.uuid4().hex
     reason = (data.get("message") or "") if status == "abort" else ""
     extra = {"abort_reason": reason[:300]} if reason else {}
+    pushes = log_push(store, number, row, status, incoming, len(tracks) - len(stored))
     if not store.update(number, {"delivery_lock": lock, "delivery_until": now + 45,
                                  "tracks": encoded, "subscription": "active",
-                                 "monitor_status": status, "company": carrier, **extra},
+                                 "monitor_status": status, "company": carrier,
+                                 "push_log": json.dumps(pushes, ensure_ascii=False), **extra},
                         ("delivery_lock", row["delivery_lock"])):
         return respond(503, "回调正在处理")
 
@@ -527,8 +553,12 @@ def handler(event, context):
                 history = json.loads(row.get("subscribe_log") or "[]")
             except ValueError:
                 history = []
+            try:
+                pushes = json.loads(row.get("push_log") or "[]")
+            except ValueError:
+                pushes = []
             return respond(200, "查询成功", parcel=parcel_details(number, row), tracks=tracks,
-                           subscribe_log=history)
+                           subscribe_log=history, push_log=pushes)
         if path in {"/unsubscribe", "/resume"}:
             return set_paused(store, number, path == "/unsubscribe")
         name = (data.get("name") or "").strip()

@@ -45,6 +45,16 @@ def print_result(result):
                 print(line)
                 if entry.get("detail"):
                     print(f"    {entry['detail']}")
+        pushes = result.get("push_log") or []
+        if pushes:
+            print("\n推送记录:")
+            for entry in reversed(pushes[-5:]):
+                line = f"  {entry.get('at','')} {entry.get('status','')} · {entry.get('outcome','')}"
+                if entry.get("nodes"):
+                    line += f" · 节点{entry.get('nodes')}"
+                if entry.get("added"):
+                    line += f" · 新增{entry.get('added')}"
+                print(line)
         for track in result["tracks"]:
             print(f"\n{track['time'] or '时间未知'}\n{track['detail']}")
         if not result["tracks"]:
