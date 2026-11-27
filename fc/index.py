@@ -158,8 +158,8 @@ def subscribe(store, event, data, number):
     current = store.get(number)
     if current and current["subscription"] == "active":
         return respond(200, f"已开始跟踪 {number}")
-    # 快递100 对同一单号重复提交返回 501「重复订阅」：订阅本来就在，不算失败。
-    if str(result.get("returnCode")) == "501" and (was_active or current and current.get("subscription") == "active"):
+    # 快递100 对同一单号重复提交返回 501「重复订阅」：说明订阅本来就在，一律按成功处理。
+    if str(result.get("returnCode")) == "501":
         store.update(number, {"subscription": "active", "confirmation_retry_at": -1}, condition)
         return respond(200, f"已在跟踪 {number}（快递100 提示重复订阅，原订阅仍有效）")
     store.update(number, {"subscription": "failed"}, condition)
