@@ -90,6 +90,7 @@ def subscribe(store, event, data, number):
 
     row = store.get(number)
     state = parcel_state(row) if row else None
+    was_active = bool(row and row.get("subscription") == "active")
     force = bool(data.get("force"))
     # 跟踪中止（abort）的运单允许重新订阅：快递100 要求 abort 后隔 30 分钟再提交。
     # force=true 时即使仍在跟踪也重新提交（例如补手机尾号）。
@@ -157,6 +158,10 @@ def subscribe(store, event, data, number):
     current = store.get(number)
     if current and current["subscription"] == "active":
         return respond(200, f"已开始跟踪 {number}")
+    # 快递100 对同一单号重复提交返回 501「重复订阅」：订阅本来就在，不算失败。
+    if str(result.get("returnCode")) == "501" and (was_active or current and current.get("subscription") == "active"):
+        store.update(number, {"subscription": "active", "confirmation_retry_at": -1}, condition)
+        return respond(200, f"已在跟踪 {number}（快递100 提示重复订阅，原订阅仍有效）")
     store.update(number, {"subscription": "failed"}, condition)
     code = str(result.get("returnCode", "未知"))
     reasons = {"501": "该运单已被订阅，请等待回调确认", "600": "请检查 AppCode 或套餐额度",
